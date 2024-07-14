@@ -1,0 +1,15 @@
+{
+  "characters": {
+    "character1": {
+      "model_path": "path/to/character1/model",
+      "tokenizer_path": "path/to/character1/tokenizer",
+      "device": "cuda"
+    },
+    "character2": {
+      "model_path": "path/to/character2/model",
+      "tokenizer_path": "path/to/character2/tokenizer",
+      "device": "cuda"
+    }
+    // Add more characters as needed
+  }
+}
