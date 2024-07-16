@@ -1,14 +1,73 @@
 # rlhf.py
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, AutoModelForCausalLM, AdamW, BertTokenizer, BertForSequenceClassification, Trainer, TrainingArguments
-from datasets import Dataset, load_metric
+import torch.optim as optim
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader, Dataset
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, AutoModelForCausalLM, BertTokenizer, BertForSequenceClassification, AdamW, Trainer, TrainingArguments
+from datasets import Dataset as HFDataset, load_metric
+from nltk.translate.bleu_score import sentence_bleu
 import random
 import argparse
 import os
 from utils.data_loader import load_data, load_config, parse_train_data, parse_asr_data
-from nltk.translate.bleu_score import sentence_bleu
+
+class FeedbackDataset(Dataset):
+    def __init__(self, data):
+        self.data = data
+    
+    def __len__(self):
+        return len(self.data)
+    
+    def __getitem__(self, idx):
+        return self.data[idx]
+
+class RewardModel(nn.Module):
+    def __init__(self):
+        super(RewardModel, self).__init__()
+        self.fc = nn.Linear(768, 1)  # 假设嵌入维度为768
+    
+    def forward(self, x):
+        return self.fc(x)
+
+def embed_text(texts):
+    embeddings = torch.randn(len(texts), 768)
+    return embeddings
+
+class RLHFTrainer:
+    def __init__(self, data, reward_model, epochs=10, lr=0.001):
+        self.data = data
+        self.reward_model = reward_model
+        self.epochs = epochs
+        self.lr = lr
+
+    def train_reward_model(self):
+        criterion = nn.MSELoss()
+        optimizer = optim.Adam(self.reward_model.parameters(), lr=self.lr)
+        
+        dataset = FeedbackDataset(self.data)
+        dataloader = DataLoader(dataset, batch_size=16, shuffle=True)
+        
+        for epoch in range(self.epochs):
+            for batch in dataloader:
+                queries = [item['query'] for item in batch]
+                responses = [item['response'] for item in batch]
+                feedbacks = torch.tensor([item['feedback'] for item in batch], dtype=torch.float32).unsqueeze(1)
+                
+                query_embeddings = embed_text(queries)
+                response_embeddings = embed_text(responses)
+                
+                rewards = self.reward_model(response_embeddings)
+                
+                loss = criterion(rewards, feedbacks)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+            
+            print(f"Epoch {epoch+1}/{self.epochs}, Loss: {loss.item()}")
 
 class StreamingInference:
     def __init__(self, model_name):
@@ -33,7 +92,6 @@ class DialogueModelTrainer:
         self.num_epochs = num_epochs
 
     def reward_function(self, generated_response, ideal_response):
-        # 使用BLEU分数作为奖励
         reference = [ideal_response.split()]
         candidate = generated_response.split()
         reward = sentence_bleu(reference, candidate)
@@ -48,10 +106,8 @@ class DialogueModelTrainer:
         outputs = self.model.generate(inputs, max_length=50)
         generated_response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
 
-        # 计算奖励
         reward = self.reward_function(generated_response, ideal_response)
 
-        # 计算损失并进行反向传播
         model_output = self.model(inputs, labels=ideal_outputs)
         loss = model_output.loss
         reward_loss = loss * reward
@@ -92,7 +148,7 @@ class BERTFineTuner:
         return self.tokenizer(examples['texts'], truncation=True, padding=True)
 
     def train(self):
-        dataset = Dataset.from_dict(self.data)
+        dataset = HFDataset.from_dict(self.data)
         encoded_dataset = dataset.map(self.preprocess_function, batched=True)
 
         training_args = TrainingArguments(
@@ -149,67 +205,79 @@ class ASRInference:
             responses[name] = self.generate_response(model, tokenizer, text)
         return responses
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="ASR Inference Script")
-    parser.add_argument('--train_data_file', type=str, required=True, help="Path to the training data file")
-    parser.add_argument('--asr_data_file', type=str, required=True, help="Path to the ASR data file")
-    parser.add_argument('--config_file', type=str, required=True, help="Path to the config file")
+class MPISetup:
+    @staticmethod
+    def setup():
+        dist.init_process_group(backend='mpi')
+
+    @staticmethod
+    def cleanup():
+        dist.destroy_process_group()
+
+class MyModel(nn.Module):
+    def __init__(self):
+        super(MyModel, self).__init__()
+        self.layer = nn.Linear(10, 10)
+
+    def forward(self, x):
+        return self.layer(x)
+
+class MPIRunner:
+    def __init__(self, rank, world_size):
+        self.rank = rank
+        self.world_size = world_size
+
+    def train(self):
+        MPISetup.setup()
+        
+        torch.cuda.set_device(self.rank)
+        model = MyModel().to(self.rank)
+        model = DDP(model, device_ids=[self.rank])
+        
+        criterion = nn.MSELoss()
+        optimizer = optim.SGD(model.parameters(), lr=0.01)
+        
+        # Dummy training loop
+        for epoch in range(10):
+            inputs = torch.randn(20, 10).to(self.rank)
+            targets = torch.randn(20, 10).to(self.rank)
+            
+            outputs = model(inputs)
+            loss = criterion(outputs, targets)
+            
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            
+            if self.rank == 0:
+                print(f"Epoch [{epoch+1}/10], Loss: {loss.item()}")
+        
+        MPISetup.cleanup()
+
+def main():
+    # Example usage
+    reward_model = RewardModel()
+    rlhf_trainer = RLHFTrainer(data=[{'query': 'example', 'response': 'example', 'feedback': 1}], reward_model=reward_model)
+    rlhf_trainer.train_reward_model()
+
+    dialogue_trainer = DialogueModelTrainer(model_name='t5-small', train_data=[{'input': 'Hello', 'ideal_response': 'Hi'}])
+    dialogue_trainer.train()
+    dialogue_trainer.save_model('dialogue_model')
+
+    bert_fine_tuner = BERTFineTuner(model_name='bert-base-uncased', data={'texts': ['Example text'], 'labels': [1]})
+    bert_fine_tuner.train()
+
+    asr_inference = ASRInference(model_names=['facebook/wav2vec2-base-960h'])
+    print(asr_inference.run_inference('Test speech'))
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--rank', type=int, default=0)
+    parser.add_argument('--world_size', type=int, default=1)
     args = parser.parse_args()
 
-    # 加载配置文件
-    config = load_config(args.config_file)
-
-    # 加载并解析训练数据
-    train_data = load_data(args.train_data_file, config)
-    parsed_train_data = parse_train_data(train_data, config)
-
-    # 初始化和训练对话模型
-    dialogue_trainer = DialogueModelTrainer(model_name='gemma-2-9b', train_data=parsed_train_data)
-    dialogue_trainer.train()
-    dialogue_trainer.save_model('./finetuned_dialogue_model')
-
-    # 示例日语对话文本数据集
-    data = {
-        "texts": [
-            "これは情報検索タスクのための例文です。",
-            "次の文を探しています。",
-            "前の文と次の文の両方が必要です。",
-            "これが私のリクエストです。",
-            "情報検索は面白い分野です。"
-        ],
-        "labels": [0, 1, 1, 0, 0]
-    }
-
-    # 初始化和训练BERT分类模型
-    bert_trainer = BERTFineTuner(model_name='cl-tohoku/bert-base-japanese', data=data)
-    bert_trainer.train()
-
-    # 初始化ASR推理模块
-    model_names = ['dpo-model', 'rlhf-model', 'ragflow-model', 'gemma-2-9b']
-    asr_inference = ASRInference(model_names=model_names)
-
-    # 加载并解析ASR数据
-    asr_data = load_data(args.asr_data_file, config)
-    parsed_asr_data = parse_asr_data(asr_data, config)
-
-    # 拆分ASR文本并进行推理
-    results = []
-
-    for entry in parsed_asr_data:
-        text = entry['text']
-        if text.strip():  # 确保非空
-            responses = asr_inference.run_inference(text)
-            results.append(responses)
-
-    # 打印或处理推理结果
-    for i, response_set in enumerate(results):
-        print(f"Segment {i+1}:")
-        for model_name, response in response_set.items():
-            print(f"{model_name}: {response}")
-        print()
-
-    # Streaming Inference 示例
-    streaming_inference = StreamingInference(model_name='gemma-2-9b')
-    streaming_text = "请用中文回答我的问题：今天的天气怎么样？"
-    for response in streaming_inference.stream_infer(streaming_text):
-        print(response)
+    if args.world_size > 1:
+        mpirunner = MPIRunner(rank=args.rank, world_size=args.world_size)
+        mpirunner.train()
+    else:
+        main()

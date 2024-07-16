@@ -86,9 +86,15 @@ class DataProcessor:
             self.current_episode = {'episode': 'Unknown', 'dialogs': []}
 
     def process_line(self, line):
-        speaker_match = re.match(r'^说话人(\d+)\s+(\d{2}:\d{2})\s+(.*)$', line)
+        speaker_match = re.match(r'^話者(\d+)\s+(\d{2}:\d{2})\s+(.*)$', line)  # 日语版本的正则表达式
         if speaker_match:
-            self.finalize_episode()
+            if self.dialog:  # 如果有未完成的对话，先完成它
+                self.current_episode['dialogs'].append({
+                    'speaker': self.current_speaker,
+                    'time': self.current_time,
+                    'text': ' '.join(self.dialog).strip()
+                })
+                self.dialog = []
             self.current_speaker, self.current_time, text = speaker_match.groups()
             self.dialog = [text]
         else:
@@ -113,11 +119,11 @@ class DataProcessor:
     def export_to_txt(self, output_file):
         with open(output_file, 'w', encoding='utf-8') as file:
             for content in self.data:
-                file.write(content + '\n')
+                file.write(json.dumps(content, ensure_ascii=False) + '\n')
 
     def handle_dialog(self, lines):
         for line in lines:
-            speaker_match = re.match(r'^说话人(\d+) (\d{2}:\d{2})', line)
+            speaker_match = re.match(r'^話者(\d+) (\d{2}:\d{2})', line)  # 日语版本的正则表达式
             if speaker_match:
                 if self.current_speaker is not None:
                     self.data.append({
@@ -161,12 +167,12 @@ class DataProcessor:
 
     def generate_new_entry(self, last_dialog):
         new_prompt = last_dialog['text']
-        new_response = "新的回答"
+        new_response = "新しい回答"  # 日语版本
         return {
             'prompt': new_prompt,
             'response': new_response,
             'chosen': new_response,
-            'rejected': "其他可选回答"
+            'rejected': "他の選択肢"
         }
 
     def decide_chosen_and_rejected(self, responses):
@@ -179,7 +185,7 @@ class DataProcessor:
         return chosen, rejected
 
 def main():
-    directory_path = '/Users/qaz1214/Downloads/internlm2-kamen-rider-blade-roleplay/data/processed/episodes_txt'
+    directory_path = '/path/to/your/data/episodes_txt'  # 更新为你的实际路径
     config_file = 'config.json'
     output_json_path = os.path.join(directory_path, 'data.json')
     output_csv_path = os.path.join(directory_path, 'data.csv')
