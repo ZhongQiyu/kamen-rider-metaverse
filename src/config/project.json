@@ -56,7 +56,6 @@
     },
     "src": {
       "__init__.py": "",
-      "__pycache__": {},
       "agents": {},
       "audio": {},
       "chatbot": {},
@@ -93,6 +92,60 @@
     "Building Your First LLM Agent Application _ NVIDIA Technical Blog.pdf": "",
     "书生·浦语项目词云可视化小赛.docx": ""
   },
-  "agent_ids": ["your_agent_id_1", "your_agent_id_2"],
-  "character_names": ["your_character_name_1", "your_character_name_2"]
+  "agent_ids": [
+    "your_agent_id_1",
+    "your_agent_id_2"
+  ],
+  "character_names": [
+    "your_character_name_1",
+    "your_character_name_2"
+  ],
+  "model_config": {
+    "_name_or_path": "gpt2",
+    "activation_function": "gelu_new",
+    "architectures": [
+      "GPT2LMHeadModel"
+    ],
+    "attn_pdrop": 0.1,
+    "bos_token_id": 50256,
+    "embd_pdrop": 0.1,
+    "eos_token_id": 50256,
+    "initializer_range": 0.02,
+    "layer_norm_epsilon": 1e-05,
+    "model_type": "gpt2",
+    "n_ctx": 1024,
+    "n_embd": 768,
+    "n_head": 12,
+    "n_inner": null,
+    "n_layer": 12,
+    "n_positions": 1024,
+    "resid_pdrop": 0.1,
+    "scale_attn_weights": true,
+    "summary_first_dropout": 0.1,
+    "summary_proj_to_labels": true,
+    "summary_type": "cls_index",
+    "summary_use_proj": true,
+    "task_specific_params": {
+      "text-generation": {
+        "do_sample": true,
+        "max_length": 50
+      }
+    },
+    "torch_dtype": "float32",
+    "transformers_version": "4.40.2",
+    "use_cache": true,
+    "vocab_size": 50257
+  },
+  "characters": {
+    "character1": {
+      "model_path": "path/to/character1/model",
+      "tokenizer_path": "path/to/character1/tokenizer",
+      "device": "cuda"
+    },
+    "character2": {
+      "model_path": "path/to/character2/model",
+      "tokenizer_path": "path/to/character2/tokenizer",
+      "device": "cuda"
+    }
+  }
 }
