@@ -1,15 +1,120 @@
 # main.py
 
-import torch
-import torch.nn.functional as F
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, AutoModelForCausalLM, AdamW, BertTokenizer, BertForSequenceClassification, Trainer, TrainingArguments
-from datasets import Dataset, load_metric, load_dataset
-import random
-import argparse
 import os
+import re
 import json
+import csv
+import torch
+import pickle
+import argparse
+import random
+import torch.nn.functional as F
+from transformers import GPT2Tokenizer, GPT2LMHeadModel, AutoTokenizer, AutoModelForSeq2SeqLM, AutoModelForCausalLM, AdamW, BertTokenizer, BertForSequenceClassification, Trainer, TrainingArguments
+from datasets import Dataset, load_metric
 
-# DataLoader类用于加载和解析数据
+class ConfigLoader:
+    @staticmethod
+    def load_config(config_file):
+        with open(config_file, 'r', encoding='utf-8') as file:
+            config = json.load(file)
+        return config
+
+class FileManager:
+    @staticmethod
+    def read_file(file_path):
+        with open(file_path, 'r', encoding='utf-8') as file:
+            lines = file.readlines()
+        return lines
+
+    @staticmethod
+    def export_to_txt(data, output_file):
+        with open(output_file, 'w', encoding='utf-8') as file:
+            for content in data:
+                file.write(json.dumps(content, ensure_ascii=False) + '\n')
+
+    @staticmethod
+    def save_as_json(data, output_file):
+        with open(output_file, 'w', encoding='utf-8') as file:
+            json.dump(data, file, ensure_ascii=False, indent=4)
+
+    @staticmethod
+    def save_as_csv(data, output_file):
+        with open(output_file, 'w', newline='', encoding='utf-8') as file:
+            fieldnames = ['episode', 'time', 'speaker', 'text']
+            writer = csv.DictWriter(file, fieldnames=fieldnames)
+            writer.writeheader()
+            for episode in data:
+                if 'dialogs' not in episode:
+                    continue
+                for dialog in episode['dialogs']:
+                    writer.writerow({
+                        'episode': episode['episode'],
+                        'time': dialog['time'],
+                        'speaker': dialog['speaker'],
+                        'text': dialog['text']
+                    })
+
+class DataProcessor:
+    def __init__(self, config):
+        self.data = []
+        self.dialog = []
+        self.current_time = None
+        self.current_episode = {'episode': 'Unknown', 'dialogs': []}
+        self.current_speaker = None
+        self.config = config
+
+    @staticmethod
+    def sort_files(filename):
+        part = filename.split('.')[0]
+        try:
+            return int(part)
+        except ValueError:
+            return float('inf')
+
+    def finalize_episode(self):
+        if self.current_episode:
+            if self.dialog:
+                self.current_episode['dialogs'].append({
+                    'speaker': self.current_speaker,
+                    'time': self.current_time,
+                    'text': ' '.join(self.dialog).strip()
+                })
+                self.dialog = []
+            self.data.append(self.current_episode)
+            print(f"Finalized episode: {self.current_episode}")
+            self.current_episode = {'episode': 'Unknown', 'dialogs': []}
+
+    def process_line(self, line):
+        speaker_match = re.match(r'^話者(\d+)\s+(\d{2}:\d{2})\s+(.*)$', line)
+        if speaker_match:
+            if self.dialog:
+                self.current_episode['dialogs'].append({
+                    'speaker': self.current_speaker,
+                    'time': self.current_time,
+                    'text': ' '.join(self.dialog).strip()
+                })
+                self.dialog = []
+            self.current_speaker, self.current_time, text = speaker_match.groups()
+            self.dialog = [text]
+        else:
+            self.dialog.append(line)
+
+    def process_file(self, file_path):
+        with open(file_path, 'r', encoding='utf-8') as file:
+            for line in file:
+                line = line.strip()
+                if line:
+                    self.process_line(line)
+        self.finalize_episode()
+        print(f"Processed file: {file_path} with data: {self.data[-1] if self.data else 'No Data'}")
+
+    def process_all_files(self, directory_path):
+        files = [f for f in os.listdir(directory_path) if f.endswith('.txt')]
+        files = sorted(files, key=self.sort_files)
+        for filename in files:
+            file_path = os.path.join(directory_path, filename)
+            self.process_file(file_path)
+
 class DataLoader:
     def __init__(self, config_file):
         self.config = self.load_config(config_file)
@@ -35,7 +140,6 @@ class DataLoader:
         parsed_data = [{'text': entry[text_key]} for entry in data]
         return parsed_data
 
-# DialogueModelTrainer类用于对话模型的训练
 class DialogueModelTrainer:
     def __init__(self, model_name, train_data, lr=5e-5, num_epochs=3):
         self.model_name = model_name
@@ -90,7 +194,6 @@ class DialogueModelTrainer:
         self.model.save_pretrained(save_path)
         self.tokenizer.save_pretrained(save_path)
 
-# BERTFineTuner类用于BERT模型的微调
 class BERTFineTuner:
     def __init__(self, model_name, data, num_labels=2, num_epochs=3):
         self.model_name = model_name
@@ -139,7 +242,6 @@ class BERTFineTuner:
         self.model.save_pretrained(save_path)
         self.tokenizer.save_pretrained(save_path)
 
-# ASRInference类用于ASR数据的推理
 class ASRInference:
     def __init__(self, model_names):
         self.models = {name: AutoModelForSeq2SeqLM.from_pretrained(name) for name in model_names}
@@ -163,7 +265,6 @@ class ASRInference:
             responses[name] = self.generate_response(model, tokenizer, text)
         return responses
 
-# StreamingInference类用于流式推理
 class StreamingInference:
     def __init__(self, model_name):
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -175,53 +276,123 @@ class StreamingInference:
         for output in outputs:
             yield self.tokenizer.decode(output, skip_special_tokens=True)
 
-# 训练模型的函数
-def train_model(args):
-    # 初始化DataLoader
-    data_loader = DataLoader(args.config_file)
+def save_model_and_tokenizer(model_name, save_directory):
+    os.makedirs(save_directory, exist_ok=True)
+    tokenizer = GPT2Tokenizer.from_pretrained(model_name)
+    model = GPT2LMHeadModel.from_pretrained(model_name)
+    model.save_pretrained(save_directory)
+    tokenizer.save_pretrained(save_directory)
 
-    # 加载并解析训练数据
+    config = model.config.to_dict()
+    config_path = os.path.join(save_directory, 'config.json')
+    with open(config_path, 'w') as f:
+        json.dump(config, f, ensure_ascii=False, indent=4)
+
+    vocab_path = os.path.join(save_directory, 'vocab.json')
+    with open(vocab_path, 'w') as f:
+        json.dump(tokenizer.get_vocab(), f, ensure_ascii=False, indent=4)
+
+    tokenizer.save_pretrained(save_directory)
+
+    added_tokens_path = os.path.join(save_directory, 'added_tokens.json')
+    if os.path.exists(added_tokens_path):
+        with open(added_tokens_path, 'w') as f:
+            json.dump(tokenizer.special_tokens_map, f, ensure_ascii=False, indent=4)
+
+    print(f"Model and tokenizer files have been saved to {save_directory}")
+
+def create_directory_structure():
+    os.makedirs("models/fine_tuned/gpt2_fine_tuned", exist_ok=True)
+
+    config = {
+        "architectures": ["BertForMaskedLM"],
+        "attention_probs_dropout_prob": 0.1,
+        "hidden_act": "gelu",
+        "hidden_dropout_prob": 0.1,
+        "hidden_size": 768,
+        "initializer_range": 0.02,
+        "intermediate_size": 3072,
+        "layer_norm_eps": 1e-12,
+        "max_position_embeddings": 512,
+        "num_attention_heads": 12,
+        "num_hidden_layers": 12,
+        "type_vocab_size": 2,
+        "vocab_size": 30522,
+        "model_type": "bert"
+    }
+
+    with open("models/fine_tuned/gpt2_fine_tuned/config.json", "w") as f:
+        json.dump(config, f, indent=4)
+
+    vocab = ["[PAD]", "[UNK]", "[CLS]", "[SEP]", "[MASK]", "the", ".", ",", "and", "of", "to"]
+    with open("models/fine_tuned/gpt2_fine_tuned/vocab.txt", "w") as f:
+        for token in vocab:
+            f.write(token + "\n")
+
+    merges = ["#version: 0.2", "e s", "t h", "th e"]
+    with open("models/fine_tuned/gpt2_fine_tuned/merges.txt", "w") as f:
+        for merge in merges:
+            f.write(merge + "\n")
+
+    training_args = {
+        "learning_rate": 5e-5,
+        "num_train_epochs": 3,
+        "per_device_train_batch_size": 8,
+        "save_steps": 10_000,
+        "save_total_limit": 2,
+        "evaluation_strategy": "epoch",
+        "logging_dir": "./logs",
+    }
+
+    with open("models/fine_tuned/gpt2_fine_tuned/training_args.bin", "wb") as f:
+        pickle.dump(training_args, f)
+
+    with open("models/fine_tuned/gpt2_fine_tuned/pytorch_model.bin", "wb") as f:
+        f.write(b"")
+
+class ModelA:
+    def __init__(self):
+        print("ModelA initialized")
+
+    def predict(self, input_data):
+        return "ModelA prediction for {}".format(input_data)
+
+class ModelB:
+    def __init__(self):
+        print("ModelB initialized")
+
+    def predict(self, input_data):
+        return "ModelB prediction for {}".format(input_data)
+
+def train_model(args):
+    data_loader = DataLoader(args.config_file)
     train_data = data_loader.load_data(args.train_data_file)
     parsed_train_data = data_loader.parse_train_data(train_data)
 
-    # 初始化对话模型训练器
     dialogue_trainer = DialogueModelTrainer(model_name=args.model_name, train_data=parsed_train_data)
     dialogue_trainer.train()
     dialogue_trainer.save_model(args.output_dir)
 
-# 处理数据的函数
 def process_data(args):
-    # 初始化DataLoader
     data_loader = DataLoader(args.config_file)
-
-    # 加载并解析ASR数据
     asr_data = data_loader.load_data(args.asr_data_file)
     parsed_asr_data = data_loader.parse_asr_data(asr_data)
-
-    # 处理数据的逻辑
     print("数据处理完成。")
 
-    # 训练模型示例
     bert_trainer = BERTFineTuner(model_name='bert-base-uncased', data={
         'texts': [entry['text'] for entry in parsed_asr_data],
-        'labels': [0] * len(parsed_asr_data)  # 假设所有标签为0，根据需要调整
+        'labels': [0] * len(parsed_asr_data)
     })
     bert_trainer.train()
     bert_trainer.save_model('./bert_finetuned_model')
 
-# 主函数
 def main():
     parser = argparse.ArgumentParser(description="Model Training and Data Processing Script")
 
-    # 公共参数
     parser.add_argument('--config_file', type=str, required=True, help="Path to the config file")
-
-    # 模型训练参数
     parser.add_argument('--train_data_file', type=str, help="Path to the training data file")
     parser.add_argument('--model_name', type=str, help="Model name")
     parser.add_argument('--output_dir', type=str, help="Output directory")
-
-    # 数据处理参数
     parser.add_argument('--asr_data_file', type=str, help="Path to the ASR data file")
 
     args = parser.parse_args()
@@ -235,3 +406,12 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
+    a = ModelA()
+    print(a.predict("test data A"))
+
+    b = ModelB()
+    print(b.predict("test data B"))
+
+    create_directory_structure()
+    print("Directory structure and files created successfully.")
