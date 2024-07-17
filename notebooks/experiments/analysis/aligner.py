@@ -3,14 +3,18 @@
 import re
 import json
 import torch
-from transformers import BertJapaneseTokenizer, BertForTokenClassification, RagTokenizer, RagRetriever, RagSequenceForGeneration
+from transformers import BertJapaneseTokenizer, BertForTokenClassification, RagTokenizer, RagRetriever, RagSequenceForGeneration, T5Tokenizer, T5Model
 from sentence_transformers import SentenceTransformer
+from fugashi import Tagger as FugashiTagger
+from janome.tokenizer import Tokenizer as JanomeTokenizer
 from typing import List
 
 class JapaneseGrammarAligner:
     def __init__(self):
         self.bert_tokenizer = BertJapaneseTokenizer.from_pretrained('cl-tohoku/bert-base-japanese')
         self.bert_model = BertForTokenClassification.from_pretrained('cl-tohoku/bert-base-japanese')
+        self.fugashi_tagger = FugashiTagger()
+        self.janome_tokenizer = JanomeTokenizer()
 
     def preprocess_text(self, text):
         text = re.sub(r'[^\w\s]', '', text)  # Remove punctuation
@@ -24,15 +28,25 @@ class JapaneseGrammarAligner:
         tokens = self.bert_tokenizer.convert_ids_to_tokens(inputs['input_ids'][0])
         return tokens, predictions[0].tolist()
 
+    def fugashi_tokenize(self, text):
+        return [word.surface for word in self.fugashi_tagger(text)]
+
+    def janome_tokenize(self, text):
+        return [token.surface for token in self.janome_tokenizer.tokenize(text)]
+
     def align_grammar(self, text):
         processed_text = self.preprocess_text(text)
         bert_tokens, bert_predictions = self.bert_tokenize(processed_text)
+        fugashi_tokens = self.fugashi_tokenize(processed_text)
+        janome_tokens = self.janome_tokenize(processed_text)
         
         alignment = {
             "original_text": text,
             "processed_text": processed_text,
             "bert_tokens": bert_tokens,
-            "bert_predictions": bert_predictions
+            "bert_predictions": bert_predictions,
+            "fugashi_tokens": fugashi_tokens,
+            "janome_tokens": janome_tokens
         }
         return alignment
 
@@ -60,6 +74,24 @@ class RAGDialogueGenerator:
         response = self.generate_response(query, context_embeddings)
         return response
 
+class T5JapaneseEmbedder:
+    def __init__(self, model_name="rinna/japanese-t5-small"):
+        self.tokenizer = T5Tokenizer.from_pretrained(model_name)
+        self.model = T5Model.from_pretrained(model_name)
+
+    def generate_embeddings(self, text):
+        inputs = self.tokenizer(text, return_tensors="pt")
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+        embeddings = outputs.last_hidden_state.squeeze(0)
+        return embeddings
+
+    def align_embeddings(self, text, aligner):
+        aligned_grammar = aligner.align_grammar(text)
+        embeddings = self.generate_embeddings(text)
+        aligned_grammar["embeddings"] = embeddings.tolist()  # Convert to list for JSON serialization
+        return aligned_grammar
+
 if __name__ == "__main__":
     # Example conversation from "Kamen Rider Blade"
     conversation = [
@@ -74,20 +106,37 @@ if __name__ == "__main__":
         "仲間たちとの絆が深まった。"
     ]
 
+    # Initialize aligner and generators
     aligner = JapaneseGrammarAligner()
-    generator = RAGDialogueGenerator()
+    rag_generator = RAGDialogueGenerator()
+    t5_embedder = T5JapaneseEmbedder()
 
-    aligned_conversation = []
+    # Process conversation with RAG
+    rag_aligned_conversation = []
     for line in conversation:
         alignment = aligner.align_grammar(line)
-        response = generator.retrieve_and_generate(line, context_documents)
+        response = rag_generator.retrieve_and_generate(line, context_documents)
         alignment["response"] = response
-        aligned_conversation.append(alignment)
+        rag_aligned_conversation.append(alignment)
 
-    # Save the results to a JSON file
+    # Save RAG results to a JSON file
     with open('rag_aligned_conversation.json', 'w', encoding='utf-8') as f:
-        json.dump(aligned_conversation, f, ensure_ascii=False, indent=4)
+        json.dump(rag_aligned_conversation, f, ensure_ascii=False, indent=4)
 
-    # Print the aligned conversation
-    for alignment in aligned_conversation:
+    # Print the RAG aligned conversation
+    for alignment in rag_aligned_conversation:
+        print(json.dumps(alignment, ensure_ascii=False, indent=4))
+
+    # Process conversation with T5 embeddings
+    t5_aligned_conversation = []
+    for line in conversation:
+        alignment = t5_embedder.align_embeddings(line, aligner)
+        t5_aligned_conversation.append(alignment)
+
+    # Save T5 results to a JSON file
+    with open('t5_aligned_conversation.json', 'w', encoding='utf-8') as f:
+        json.dump(t5_aligned_conversation, f, ensure_ascii=False, indent=4)
+
+    # Print the T5 aligned conversation
+    for alignment in t5_aligned_conversation:
         print(json.dumps(alignment, ensure_ascii=False, indent=4))
