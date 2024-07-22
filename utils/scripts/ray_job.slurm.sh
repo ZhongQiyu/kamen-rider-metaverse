@@ -1,11 +1,12 @@
 #!/bin/bash
-#SBATCH --job-name=ray-rllib-job
-#SBATCH --cpus-per-task=4
-#SBATCH --nodes=2
-#SBATCH --tasks-per-node=1
-#SBATCH --time=01:00:00
-#SBATCH --partition=your_partition
-#SBATCH --output=ray-rllib-%j.out
+
+# SBATCH --job-name=ray-rllib-job
+# SBATCH --cpus-per-task=4
+# SBATCH --nodes=2
+# SBATCH --tasks-per-node=1
+# SBATCH --time=01:00:00
+# SBATCH --partition=your_partition
+# SBATCH --output=ray-rllib-%j.out
 
 # 加载 Python 环境和 Ray
 module load python/3.7  # 假设你使用 module 系统
